@@ -32,7 +32,7 @@ from .image_host.img_sync import ImageSync
 from .mixins.commands import CommandMixin
 from .mixins.event_handlers import EventHandlerMixin, normalize_trigger_scope
 from .mixins.web_api import WebAPIMixin
-from .utils import dict_to_string, load_json
+from .utils import dict_to_string, load_json, probability_hit
 
 MEME_PROMPT_MARKER_START = "<!-- meme_manager_prompt:start -->"
 MEME_PROMPT_MARKER_END = "<!-- meme_manager_prompt:end -->"
@@ -674,14 +674,14 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
         return (
             f"\n\n{SEMANTIC_PROMPT_MARKER_START}\n"
             "[表情图片工具]\n"
-            "此工具只增加图片表达方式，不改变既有人设、语气和对话目标。"
-            "是否配图及数量由上下文决定；可以纯文字、图文结合，也可以只回复表情。"
-            "用户要求不发图或限定输出格式时，遵循该要求。\n"
-            "[使用步骤]\n"
-            "需要图片表达时调用 search_memes，本轮最多搜索一次。query 用简短自然语言描述"
-            "你准备表达的态度、情绪或动作，保留自嘲、安慰对方等对象关系；不要只照搬用户的情绪。\n"
-            "从本轮候选中选贴切的图片；没有合适候选或搜索失败时正常回复，不必凑图。"
-            "发送时将完整候选 id 包在 && 中，每个标记独占一行，有正文时放在末尾。"
+            "此工具为回复增添贴切的表情图片，严格保持既有人设、语气和对话目标不变。"
+            "用户要求不发图或限定纯文字输出格式时，严格遵循该要求。\n"
+            "[调用时机与使用步骤]\n"
+            "1. 触发时机：在日常闲聊、分享情感（如喜悦、安慰对方、吐槽、比心、赞同、逗趣）、或用户发送表情包互动等情境下，"
+            "应适度主动调用 search_memes 搜索贴切表情配图，避免仅用纯文字或文本颜文字替代；但在严肃问答、技术解析等客观场景下保持纯文字，不调用此工具。\n"
+            "2. 搜索要求：本轮最多搜索一次。query 用简短自然语言描述你准备表达的态度、情绪或动作，保留自嘲、安慰对方等对象关系；不要只照搬用户的情绪。\n"
+            "3. 候选选取：从本轮候选中选取最贴切的图片；没有合适候选或搜索失败时正常文本回复，不必勉强凑图。\n"
+            "4. 发送格式：发送时将完整候选 id 包在 && 中，每个标记独占一行，有正文时放在末尾。"
             "例如 id 为 meme:123456789abc，写成 &&meme:123456789abc&&，不要重复 meme: 前缀。"
             "只输出选中且不重复的标记，不加代码框。\n"
             "[内部选图资料]\n"
@@ -847,7 +847,15 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
                 event=event, req=req, require_tool=True
             )
             if semantic_tool_ready:
-                semantic_mode = "tool"
+                if probability_hit(self.emotions_probability):
+                    semantic_mode = "tool"
+                else:
+                    self._remove_semantic_tool(req)
+                    req.system_prompt = self._strip_meme_prompt(req.system_prompt)
+                    if event is not None and hasattr(event, "set_extra"):
+                        event.set_extra("meme_manager_semantic_active", False)
+                        event.set_extra("meme_manager_semantic_mode", "")
+                    return
         semantic_active = bool(semantic_mode)
         if event is not None and hasattr(event, "set_extra"):
             event.set_extra("meme_manager_semantic_active", semantic_active)
@@ -924,7 +932,7 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
 
     @llm_tool(name="search_memes")
     async def search_memes_tool(self, event: AstrMessageEvent, query: str) -> str:
-        """Find optional meme images for the assistant's intended expression.
+        """Search and find suitable meme images or sticker reactions for the assistant's intended emotional expression.
 
         Args:
             query(string): A short description of the assistant's intended emotion,

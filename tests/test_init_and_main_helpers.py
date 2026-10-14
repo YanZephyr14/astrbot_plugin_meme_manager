@@ -399,3 +399,63 @@ def test_custom_quantity_prompt_is_independent_of_hard_limit(limit):
         == "Persona"
     )
     assert sender._strip_meme_prompt("Persona" + semantic) == "Persona"
+
+
+def test_apply_request_prompt_semantic_tool_probability_hit_and_miss(monkeypatch):
+    """验证语义 Tool 模式严格遵循 emotions_probability 概率门控"""
+    sender = plugin_main.MemeSender.__new__(plugin_main.MemeSender)
+    sender.emotion_llm_enabled = False
+    sender._semantic_pack_ready = lambda event, req, require_tool=False: True
+    sender._semantic_system_prompt = lambda: "<!-- meme_manager_semantic_prompt:start -->\n[表情图片工具]\n<!-- meme_manager_semantic_prompt:end -->"
+    sender._strip_meme_prompt = lambda prompt: prompt.replace(
+        "<!-- meme_manager_semantic_prompt:start -->\n[表情图片工具]\n<!-- meme_manager_semantic_prompt:end -->",
+        "",
+    )
+
+    class DummyEvent:
+        def __init__(self):
+            self.extra = {}
+
+        def get_extra(self, key):
+            return self.extra.get(key)
+
+        def set_extra(self, key, value):
+            self.extra[key] = value
+
+    class DummyToolSet:
+        def __init__(self):
+            self.tools = ["search_memes", "other_tool"]
+
+        def remove_tool(self, name):
+            if name in self.tools:
+                self.tools.remove(name)
+
+    removed_tools = []
+    sender._remove_semantic_tool = lambda req: removed_tools.append(True)
+
+    # 1. 概率 100% 命中：进入 tool 模式并注入语义提示词
+    sender.emotions_probability = 100
+    req_hit = SimpleNamespace(system_prompt="Base Prompt", func_tool=DummyToolSet())
+    event_hit = DummyEvent()
+    sender._apply_request_prompt(req_hit, event_hit)
+
+    assert event_hit.get_extra("meme_manager_semantic_active") is True
+    assert event_hit.get_extra("meme_manager_semantic_mode") == "tool"
+    assert "[表情图片工具]" in req_hit.system_prompt
+    assert not removed_tools
+
+    # 2. 概率 0% 未命中：不进入 tool 模式，清理工具与提示词并退出
+    sender.emotions_probability = 0
+    req_miss = SimpleNamespace(
+        system_prompt="Base Prompt<!-- meme_manager_semantic_prompt:start -->\n[表情图片工具]\n<!-- meme_manager_semantic_prompt:end -->",
+        func_tool=DummyToolSet(),
+    )
+    event_miss = DummyEvent()
+    sender._apply_request_prompt(req_miss, event_miss)
+
+    assert event_miss.get_extra("meme_manager_semantic_active") is False
+    assert event_miss.get_extra("meme_manager_semantic_mode") == ""
+    assert "[表情图片工具]" not in req_miss.system_prompt
+    assert req_miss.system_prompt == "Base Prompt"
+    assert len(removed_tools) == 1
+

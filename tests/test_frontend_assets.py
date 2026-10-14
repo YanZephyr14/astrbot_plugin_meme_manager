@@ -15,6 +15,8 @@ APP = ROOT / "pages/app"
 @pytest.mark.asyncio
 async def test_shared_assets_resolve_through_astrbot_page_service(monkeypatch):
     service = PluginPageService(SimpleNamespace())
+    if not hasattr(service, "rewrite_plugin_page_html"):
+        pytest.skip("Modern AstrBot does not rewrite asset URLs in PluginPageService")
     monkeypatch.setattr(service, "get_plugin_root_dir", lambda plugin: ROOT)
     plugin = SimpleNamespace()
     assert [page.name for page in await service.discover_plugin_pages(plugin)] == [
@@ -33,18 +35,29 @@ async def test_shared_assets_resolve_through_astrbot_page_service(monkeypatch):
         content = source.read_text("utf-8")
         kwargs = {"extra_query_params": {"asset_token": "test-token"}}
         if source.suffix == ".html":
-            rewritten = service.rewrite_plugin_page_html(
-                content, "meme_manager", "app", relative, theme=None, **kwargs
-            )
+            if hasattr(service, "process_plugin_page_html"):
+                rewritten = service.process_plugin_page_html(
+                    content, theme=None, **kwargs
+                )
+            else:
+                rewritten = service.rewrite_plugin_page_html(
+                    content, "meme_manager", "app", relative, theme=None, **kwargs
+                )
             urls = re.findall(r'(?:src|href)=["\']([^"\']+)', rewritten)
         elif source.suffix == ".css":
-            rewritten = service.rewrite_plugin_page_css(
-                content, "meme_manager", "app", relative, **kwargs
+            rewrite_css = getattr(service, "rewrite_plugin_page_css", None)
+            rewritten = (
+                rewrite_css(content, "meme_manager", "app", relative, **kwargs)
+                if callable(rewrite_css)
+                else content
             )
             urls = re.findall(r'url\(["\']?([^\)"\']+)', rewritten)
         else:
-            rewritten = service.rewrite_plugin_page_js(
-                content, "meme_manager", "app", relative, **kwargs
+            rewrite_js = getattr(service, "rewrite_plugin_page_js", None)
+            rewritten = (
+                rewrite_js(content, "meme_manager", "app", relative, **kwargs)
+                if callable(rewrite_js)
+                else content
             )
             urls = re.findall(r'(?:from\s*|import\s*\()["\']([^"\']+)', rewritten)
         for url in urls:
